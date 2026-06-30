@@ -1,7 +1,6 @@
 package palm
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 
@@ -54,50 +53,39 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 	responseText := ""
 	responseId := helper.GetResponseID(c)
 	createdTime := common.GetTimestamp()
-	dataChan := make(chan string)
-	stopChan := make(chan bool)
-	go func() {
-		responseBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			common.SysLog("error reading stream response: " + err.Error())
-			stopChan <- true
-			return
-		}
-		service.CloseResponseBodyGracefully(resp)
-		var palmResponse PaLMChatResponse
-		err = json.Unmarshal(responseBody, &palmResponse)
-		if err != nil {
-			common.SysLog("error unmarshalling stream response: " + err.Error())
-			stopChan <- true
-			return
-		}
-		fullTextResponse := streamResponsePaLM2OpenAI(&palmResponse)
-		fullTextResponse.Id = responseId
-		fullTextResponse.Created = createdTime
-		if len(palmResponse.Candidates) > 0 {
-			responseText = palmResponse.Candidates[0].Content
-		}
-		jsonResponse, err := json.Marshal(fullTextResponse)
-		if err != nil {
-			common.SysLog("error marshalling stream response: " + err.Error())
-			stopChan <- true
-			return
-		}
-		dataChan <- string(jsonResponse)
-		stopChan <- true
-	}()
+	closeBody := service.CloseResponseBodyOnContextDone(c.Request.Context(), resp)
+	defer closeBody()
 	helper.SetEventStreamHeaders(c)
-	c.Stream(func(w io.Writer) bool {
-		select {
-		case data := <-dataChan:
-			c.Render(-1, common.CustomEvent{Data: "data: " + data})
-			return true
-		case <-stopChan:
-			c.Render(-1, common.CustomEvent{Data: "data: [DONE]"})
-			return false
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		common.SysLog("error reading stream response: " + err.Error())
+		if c.Request.Context().Err() == nil {
+			helper.Done(c)
 		}
-	})
-	service.CloseResponseBodyGracefully(resp)
+		return nil, responseText
+	}
+	var palmResponse PaLMChatResponse
+	err = common.Unmarshal(responseBody, &palmResponse)
+	if err != nil {
+		common.SysLog("error unmarshalling stream response: " + err.Error())
+		if c.Request.Context().Err() == nil {
+			helper.Done(c)
+		}
+		return nil, responseText
+	}
+	fullTextResponse := streamResponsePaLM2OpenAI(&palmResponse)
+	fullTextResponse.Id = responseId
+	fullTextResponse.Created = createdTime
+	if len(palmResponse.Candidates) > 0 {
+		responseText = palmResponse.Candidates[0].Content
+	}
+	if err := helper.ObjectData(c, fullTextResponse); err != nil {
+		common.SysLog("error rendering stream response: " + err.Error())
+		return nil, responseText
+	}
+	if c.Request.Context().Err() == nil {
+		helper.Done(c)
+	}
 	return nil, responseText
 }
 
@@ -108,7 +96,7 @@ func palmHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respons
 	}
 	service.CloseResponseBodyGracefully(resp)
 	var palmResponse PaLMChatResponse
-	err = json.Unmarshal(responseBody, &palmResponse)
+	err = common.Unmarshal(responseBody, &palmResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}

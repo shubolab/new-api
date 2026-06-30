@@ -2,10 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -20,6 +22,36 @@ func CloseResponseBodyGracefully(httpResponse *http.Response) {
 	err := httpResponse.Body.Close()
 	if err != nil {
 		common.SysError("failed to close response body: " + err.Error())
+	}
+}
+
+func CloseResponseBodyOnContextDone(ctx context.Context, httpResponse *http.Response) func() {
+	if ctx == nil || httpResponse == nil || httpResponse.Body == nil {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeBody := func() {
+		closeOnce.Do(func() {
+			CloseResponseBodyGracefully(httpResponse)
+		})
+	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeBody()
+		case <-done:
+		}
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(done)
+			closeBody()
+		})
 	}
 }
 
